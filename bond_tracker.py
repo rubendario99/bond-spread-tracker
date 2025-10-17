@@ -17,10 +17,10 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 # Serie de FRED: ICE BofA US High Yield Index Option-Adjusted Spread
 FRED_SERIES_ID = 'BAMLH0A0HYM2'
 
-# Umbrales de alerta
-UMBRAL_CAMBIO_DIARIO = 0.15  # Alerta si cambia más de 0.15% en un día
-UMBRAL_SPREAD_ALTO = 5.0      # Alerta si supera 5%
-UMBRAL_SPREAD_CRITICO = 6.5   # Alerta crítica si supera 6.5%
+# Umbrales de alerta (AJUSTADOS PARA MAYOR SENSIBILIDAD)
+UMBRAL_CAMBIO_DIARIO = 0.12  # Alerta si cambia más de 0.12% en un día (antes: 0.15)
+UMBRAL_SPREAD_ALTO = 4.5      # Alerta si supera 4.5% (antes: 5.0)
+UMBRAL_SPREAD_CRITICO = 6.0   # Alerta crítica si supera 6.0% (antes: 6.5)
 
 # Archivo para guardar estado
 STATE_FILE = 'bond_spread_state.json'
@@ -28,39 +28,57 @@ STATE_FILE = 'bond_spread_state.json'
 
 def obtener_datos_fred(dias=5):
     """
-    Obtiene datos del spread de FRED API
+    Obtiene datos del spread de FRED API con reintentos
     Solicita últimos 'dias' días para tener histórico reciente
     """
-    url = f'https://api.stlouisfed.org/fred/series/observations'
-    params = {
-        'series_id': FRED_SERIES_ID,
-        'api_key': FRED_API_KEY,
-        'file_type': 'json',
-        'sort_order': 'desc',
-        'limit': dias
-    }
+    max_intentos = 3
     
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    for intento in range(max_intentos):
+        try:
+            url = f'https://api.stlouisfed.org/fred/series/observations'
+            params = {
+                'series_id': FRED_SERIES_ID,
+                'api_key': FRED_API_KEY,
+                'file_type': 'json',
+                'sort_order': 'desc',
+                'limit': dias
+            }
+            
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'observations' not in data or len(data['observations']) == 0:
+                raise Exception("No se recibieron datos de FRED")
+            
+            # Convertir y ordenar por fecha (más reciente primero)
+            observaciones = []
+            for obs in data['observations']:
+                if obs['value'] != '.':  # Filtrar valores no disponibles
+                    observaciones.append({
+                        'fecha': obs['date'],
+                        'valor': float(obs['value'])
+                    })
+            
+            # Validar que los datos tengan sentido
+            if len(observaciones) == 0:
+                raise Exception("Todos los valores son inválidos")
+            
+            # Verificar que el último valor esté en rango razonable (0.5% - 30%)
+            ultimo_valor = observaciones[0]['valor']
+            if not (0.5 <= ultimo_valor <= 30.0):
+                raise Exception(f"Valor fuera de rango razonable: {ultimo_valor}%")
+            
+            print(f"✅ Datos obtenidos correctamente (intento {intento + 1}/{max_intentos})")
+            return observaciones
         
-        if 'observations' not in data or len(data['observations']) == 0:
-            raise Exception("No se recibieron datos de FRED")
-        
-        # Convertir y ordenar por fecha (más reciente primero)
-        observaciones = []
-        for obs in data['observations']:
-            if obs['value'] != '.':  # Filtrar valores no disponibles
-                observaciones.append({
-                    'fecha': obs['date'],
-                    'valor': float(obs['value'])
-                })
-        
-        return observaciones
-    
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error al obtener datos de FRED: {e}")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Intento {intento + 1}/{max_intentos} falló: {e}")
+            if intento < max_intentos - 1:
+                import time
+                time.sleep(2)  # Esperar 2 segundos antes de reintentar
+            else:
+                raise Exception(f"Error al obtener datos de FRED después de {max_intentos} intentos: {e}")
 
 
 def cargar_estado():
@@ -179,10 +197,31 @@ def analizar_datos(datos_actuales, estado_anterior):
     # 4. Tendencia sostenida (si hay suficientes datos)
     if len(datos_actuales) >= 5:
         ultimos_5 = [d['valor'] for d in datos_actuales[:5]]
+        
+        # Tendencia alcista fuerte (5 días subiendo)
         if all(ultimos_5[i] > ultimos_5[i+1] for i in range(4)):
-            alertas.append("📈 <b>TENDENCIA</b>: 5 días consecutivos al alza")
+            cambio_total = ultimos_5[0] - ultimos_5[4]
+            alertas.append(
+                f"📈 <b>TENDENCIA ALCISTA SOSTENIDA</b>\n"
+                f"   5 días consecutivos subiendo (+{cambio_total:.2f}%)"
+            )
+            if ultimos_5[0] > UMBRAL_SPREAD_ALTO:
+                es_critico = True
+        
+        # Tendencia bajista fuerte (5 días bajando)
         elif all(ultimos_5[i] < ultimos_5[i+1] for i in range(4)):
-            alertas.append("📉 <b>TENDENCIA</b>: 5 días consecutivos a la baja")
+            cambio_total = ultimos_5[4] - ultimos_5[0]
+            alertas.append(
+                f"📉 <b>TENDENCIA BAJISTA SOSTENIDA</b>\n"
+                f"   5 días consecutivos bajando (-{cambio_total:.2f}%)"
+            )
+        
+        # Tendencia alcista moderada (4 de 5 días subiendo)
+        elif sum(1 for i in range(4) if ultimos_5[i] > ultimos_5[i+1]) >= 3:
+            alertas.append(
+                f"📈 <b>TENDENCIA ALCISTA</b>\n"
+                f"   Subiendo en 4 de los últimos 5 días"
+            )
     
     # ===== CONSTRUIR MENSAJE =====
     if alertas:
@@ -215,6 +254,81 @@ def analizar_datos(datos_actuales, estado_anterior):
     return False, None, False
 
 
+def verificar_salud_sistema():
+    """Verifica que el sistema esté funcionando correctamente"""
+    problemas = []
+    
+    # Verificar variables de entorno
+    if not FRED_API_KEY:
+        problemas.append("❌ FRED_API_KEY no configurado")
+    if not TELEGRAM_BOT_TOKEN:
+        problemas.append("❌ TELEGRAM_BOT_TOKEN no configurado")
+    if not TELEGRAM_CHAT_ID:
+        problemas.append("❌ TELEGRAM_CHAT_ID no configurado")
+    
+    # Verificar última ejecución
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                estado = json.load(f)
+                if 'ultima_ejecucion' in estado:
+                    from datetime import datetime, timedelta
+                    ultima = datetime.fromisoformat(estado['ultima_ejecucion'])
+                    ahora = datetime.now()
+                    dias_sin_ejecutar = (ahora - ultima).days
+                    
+                    if dias_sin_ejecutar > 7:
+                        problemas.append(f"⚠️ No se ha ejecutado en {dias_sin_ejecutar} días")
+        except:
+            pass
+    
+    if problemas:
+        mensaje = (
+            f"🔧 <b>Auto-diagnóstico del Bot</b>\n\n"
+            f"⚠️ Se detectaron problemas:\n\n"
+        )
+        for problema in problemas:
+            mensaje += f"• {problema}\n"
+        mensaje += f"\n<i>Por favor, revisa la configuración</i>"
+        enviar_telegram(mensaje, True)
+        
+    return len(problemas) == 0
+
+
+def enviar_heartbeat_semanal():
+    """Envía un mensaje semanal confirmando que el bot funciona"""
+    try:
+        from datetime import datetime
+        hoy = datetime.now()
+        
+        # Enviar heartbeat solo los viernes
+        if hoy.weekday() == 4:  # 4 = Viernes
+            datos = obtener_datos_fred(dias=5)
+            if datos:
+                spread_actual = datos[0]['valor']
+                fecha_actual = datos[0]['fecha']
+                
+                # Calcular promedio de la semana
+                spreads_semana = [d['valor'] for d in datos[:5]]
+                promedio = sum(spreads_semana) / len(spreads_semana)
+                
+                mensaje = (
+                    f"💚 <b>Heartbeat Semanal - Bot Activo</b>\n\n"
+                    f"✅ El bot está funcionando correctamente\n\n"
+                    f"📅 Semana terminada: {fecha_actual}\n"
+                    f"📈 Spread actual: <b>{spread_actual:.2f}%</b>\n"
+                    f"📊 Promedio semanal: {promedio:.2f}%\n"
+                    f"📉 Rango: {min(spreads_semana):.2f}% - {max(spreads_semana):.2f}%\n\n"
+                    f"{'🟢 Estado: Normal (sin alertas esta semana)' if spread_actual < 5.0 else '🟡 Estado: Vigilancia'}\n\n"
+                    f"<i>Recibirás este mensaje cada viernes para confirmar que el bot funciona</i>"
+                )
+                
+                enviar_telegram(mensaje, False)
+                print("✅ Heartbeat semanal enviado")
+    except Exception as e:
+        print(f"⚠️ Error en heartbeat: {e}")
+
+
 def main():
     """Función principal"""
     print("=" * 60)
@@ -228,6 +342,10 @@ def main():
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ WARNING: Telegram no configurado - solo se mostrará en logs")
+    
+    # Verificar salud del sistema
+    print("\n🔍 Verificando salud del sistema...")
+    verificar_salud_sistema()
     
     try:
         # Obtener datos actuales
@@ -270,6 +388,9 @@ def main():
         }
         guardar_estado(nuevo_estado)
         print(f"\n💾 Estado guardado: {nuevo_estado['fecha']}")
+        
+        # Enviar heartbeat semanal si es viernes
+        enviar_heartbeat_semanal()
         
         print("\n✅ Ejecución completada exitosamente")
         return 0
