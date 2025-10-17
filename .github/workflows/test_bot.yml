@@ -1,0 +1,27 @@
+name: Test Bot
+
+on:
+  workflow_dispatch:  # Solo manual
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Instalar dependencias
+      run: pip install requests
+    
+    - name: Ejecutar tests
+      env:
+        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python test_bot.py
