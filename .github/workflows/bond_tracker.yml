@@ -1,0 +1,51 @@
+name: Bond Spread Tracker
+
+on:
+  schedule:
+    # Ejecutar de lunes a viernes a las 17:00 UTC (18:00 CET / 19:00 CEST)
+    # FRED actualiza datos alrededor de las 16:00 UTC
+    - cron: '0 17 * * 1-5'
+  
+  # Permitir ejecución manual desde GitHub
+  workflow_dispatch:
+
+jobs:
+  check-spread:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Instalar dependencias
+      run: |
+        pip install requests
+    
+    - name: Restaurar estado anterior
+      uses: actions/cache@v4
+      with:
+        path: bond_spread_state.json
+        key: bond-spread-state-${{ github.run_id }}
+        restore-keys: |
+          bond-spread-state-
+    
+    - name: Ejecutar tracker
+      env:
+        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python bond_tracker.py
+    
+    - name: Guardar estado para próxima ejecución
+      uses: actions/cache/save@v4
+      if: always()
+      with:
+        path: bond_spread_state.json
+        key: bond-spread-state-${{ github.run_id }}
