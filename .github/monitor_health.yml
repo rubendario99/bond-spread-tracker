@@ -1,0 +1,172 @@
+name: Monitor Bot Health
+
+on:
+  schedule:
+    # Verificar salud del bot cada lunes a las 09:00 UTC
+    - cron: '0 9 * * 1'
+  
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Instalar dependencias
+      run: pip install requests
+    
+    - name: Verificar última ejecución del bot principal
+      run: |
+        echo "🔍 Verificando última ejecución del bond_tracker..."
+        
+        # Obtener workflows recientes
+        WORKFLOW_RUNS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bond_tracker.yml/runs?per_page=5")
+        
+        # Verificar si hay ejecuciones recientes exitosas
+        LAST_SUCCESS=$(echo $WORKFLOW_RUNS | jq -r '.workflow_runs[0].conclusion')
+        LAST_RUN_DATE=$(echo $WORKFLOW_RUNS | jq -r '.workflow_runs[0].created_at')
+        
+        echo "Última ejecución: $LAST_RUN_DATE"
+        echo "Estado: $LAST_SUCCESS"
+        
+        if [ "$LAST_SUCCESS" != "success" ]; then
+          echo "⚠️ La última ejecución no fue exitosa"
+          exit 1
+        fi
+    
+    - name: Verificar conectividad FRED
+      env:
+        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      run: |
+        python3 << 'EOF'
+        import requests
+        import os
+        import sys
+        
+        api_key = os.environ.get('FRED_API_KEY')
+        url = 'https://api.stlouisfed.org/fred/series/observations'
+        params = {
+            'series_id': 'BAMLH0A0HYM2',
+            'api_key': api_key,
+            'file_type': 'json',
+            'limit': 1
+        }
+        
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                print("✅ FRED API respondiendo correctamente")
+            else:
+                print(f"❌ FRED API error: {response.status_code}")
+                sys.exit(1)
+        except Exception as e:
+            print(f"❌ Error conectando a FRED: {e}")
+            sys.exit(1)
+        EOF
+    
+    - name: Verificar conectividad Telegram
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      run: |
+        python3 << 'EOF'
+        import requests
+        import os
+        import sys
+        
+        token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        url = f'https://api.telegram.org/bot{token}/getMe'
+        
+        try:
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            if data.get('ok'):
+                print(f"✅ Telegram Bot activo: @{data['result']['username']}")
+            else:
+                print(f"❌ Telegram Bot error: {data}")
+                sys.exit(1)
+        except Exception as e:
+            print(f"❌ Error conectando a Telegram: {e}")
+            sys.exit(1)
+        EOF
+    
+    - name: Enviar reporte de salud
+      if: success()
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python3 << 'EOF'
+        import requests
+        import os
+        from datetime import datetime
+        
+        token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        
+        mensaje = (
+            f"💚 <b>Reporte de Salud del Bot</b>\n\n"
+            f"✅ Todos los sistemas funcionando correctamente\n\n"
+            f"🔍 Verificaciones realizadas:\n"
+            f"• FRED API: ✅ Operativo\n"
+            f"• Telegram API: ✅ Operativo\n"
+            f"• GitHub Actions: ✅ Ejecutando\n"
+            f"• Workflow principal: ✅ Funcionando\n\n"
+            f"📅 Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"<i>Este mensaje confirma que el sistema de monitoreo está activo</i>"
+        )
+        
+        url = f'https://api.telegram.org/bot{token}/sendMessage'
+        payload = {
+            'chat_id': chat_id,
+            'text': mensaje,
+            'parse_mode': 'HTML'
+        }
+        
+        response = requests.post(url, json=payload)
+        if response.json().get('ok'):
+            print("✅ Reporte de salud enviado")
+        EOF
+    
+    - name: Alertar si hay problemas
+      if: failure()
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python3 << 'EOF'
+        import requests
+        import os
+        from datetime import datetime
+        
+        token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        
+        mensaje = (
+            f"🚨 <b>ALERTA: Problema en el Bot</b>\n\n"
+            f"❌ Se detectaron problemas en las verificaciones\n\n"
+            f"📅 Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"🔧 Acción requerida:\n"
+            f"• Revisa GitHub Actions\n"
+            f"• Verifica las credenciales\n"
+            f"• Comprueba logs en el repositorio\n\n"
+            f"<i>Por favor, revisa la configuración del bot</i>"
+        )
+        
+        url = f'https://api.telegram.org/bot{token}/sendMessage'
+        payload = {
+            'chat_id': chat_id,
+            'text': mensaje,
+            'parse_mode': 'HTML'
+        }
+        
+        requests.post(url, json=payload)
+        EOF
